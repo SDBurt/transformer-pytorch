@@ -8,6 +8,45 @@ import torch.nn.functional as F
 
 from models import TransformerModel, PositionalEncoding
 
+
+import os, time, argparse, logging
+from datetime import datetime
+from pathlib import Path
+from tqdm import trange
+import os
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+logger.info('Reading Arguments')
+
+parser = argparse.ArgumentParser()
+
+# Preprocessing ---------------------------------------------------------------
+parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--max_length', type=int, default=20)
+parser.add_argument('--buffer_size', type=int, default=2000)
+
+# Model -----------------------------------------------------------------------
+parser.add_argument('--num_layers',  type=int, default=2)
+parser.add_argument('--d_model', type=int, default=64)
+parser.add_argument('--dff', type=int, default=256)
+parser.add_argument('--num_heads',  type=int, default=4)
+parser.add_argument('--dropout_rate', type=float, default=0.05)
+
+# Training --------------------------------------------------------------------
+parser.add_argument('--epochs', type=int, default=5)
+
+# Saving / Logging ------------------------------------------------------------
+parser.add_argument('--log_dir', type=str, default='./logs/')
+parser.add_argument("--log_freq", type=int, default=2)
+parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/')
+parser.add_argument('--checkpoint_freq',type=int, default=2)
+parser.add_argument('--extension', type=str, default=None)
+
+cfg = parser.parse_args()
+
 TEXT = torchtext.data.Field(tokenize=get_tokenizer("basic_english"),
                             init_token='<sos>',
                             eos_token='<eos>',
@@ -53,10 +92,39 @@ dropout = 0.2  # the dropout value
 model = TransformerModel(ntokens, emsize, nhead, nhid,
                          nlayers, dropout).to(device)
 
+model = torch.load('/home/sdburt/Development/ml/transformer-pytorch/checkpoints/2020-03-25_10:11:04.pt')
+
 criterion = nn.CrossEntropyLoss()
 lr = 5.0  # learning rate
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+
+
+
+def build_writers():
+
+    logger.info('Initializing Build Writers')
+
+    if not Path(cfg.checkpoint_dir).is_dir():
+        os.mkdir(cfg.checkpoint_dir)
+
+    if not Path(cfg.log_dir).is_dir():
+        os.mkdir(cfg.log_dir)
+
+    if cfg.extension is None:
+        cfg.extension = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+
+    # self.log_path = cfg.log_dir + cfg.extension
+    # self.writer = tf.summary.create_file_writer(self.log_path)
+    # self.writer.set_as_default()
+
+    # #self.saved_models_dir = cfg.saved_models_dir
+    # self.checkpoint_dir = cfg.checkpoint_dir
+    # self.checkpoint_prefix = self.checkpoint_dir + "ckpt_{epoch}"
+
+# def log_scalar(name, scalar):
+#     if (self.global_step % cfg.log_freq) == 0:
+#         tf.summary.scalar(name, scalar, step=self.global_step)
 
 
 def train():
@@ -106,6 +174,8 @@ best_val_loss = float("inf")
 epochs = 1  # The number of epochs
 best_model = None
 
+build_writers()
+
 for epoch in range(1, epochs + 1):
     epoch_start_time = time.time()
     train()
@@ -129,4 +199,4 @@ print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
 
-torch.save(best_model, "checkpoint/")
+torch.save(best_model, (cfg.checkpoint_dir + cfg.extension + '.pt'))

@@ -2,6 +2,7 @@ import torch
 import torchtext
 import time
 from torchtext.data.utils import get_tokenizer
+from torch.utils.tensorboard import SummaryWriter
 import math
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +10,10 @@ import torch.nn.functional as F
 from models import TransformerModel, PositionalEncoding
 
 
-import os, time, argparse, logging
+import os
+import time
+import argparse
+import logging
 from datetime import datetime
 from pathlib import Path
 from tqdm import trange
@@ -29,20 +33,20 @@ parser.add_argument('--max_length', type=int, default=20)
 parser.add_argument('--buffer_size', type=int, default=2000)
 
 # Model -----------------------------------------------------------------------
-parser.add_argument('--num_layers',  type=int, default=2)
-parser.add_argument('--d_model', type=int, default=64)
-parser.add_argument('--dff', type=int, default=256)
-parser.add_argument('--num_heads',  type=int, default=4)
-parser.add_argument('--dropout_rate', type=float, default=0.05)
+parser.add_argument('--emsize', type=int, default=200)
+parser.add_argument('--nhid', type=int, default=200)
+parser.add_argument('--nlayers', type=int, default=2)
+parser.add_argument('--nhead', type=int, default=2)
+parser.add_argument('--dropout', type=float, default=0.2)
 
 # Training --------------------------------------------------------------------
-parser.add_argument('--epochs', type=int, default=5)
+parser.add_argument('--epochs', type=int, default=3)
 
 # Saving / Logging ------------------------------------------------------------
 parser.add_argument('--log_dir', type=str, default='./logs/')
 parser.add_argument("--log_freq", type=int, default=2)
 parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/')
-parser.add_argument('--checkpoint_freq',type=int, default=2)
+parser.add_argument('--checkpoint_freq', type=int, default=2)
 parser.add_argument('--extension', type=str, default=None)
 
 cfg = parser.parse_args()
@@ -89,16 +93,15 @@ nhid = 200  # the dimension of the feedforward network model in nn.TransformerEn
 nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 nhead = 2  # the number of heads in the multiheadattention models
 dropout = 0.2  # the dropout value
-model = TransformerModel(ntokens, emsize, nhead, nhid,
-                         nlayers, dropout).to(device)
 
-model = torch.load('/home/sdburt/Development/ml/transformer-pytorch/checkpoints/2020-03-25_10:11:04.pt')
+
+model = TransformerModel(ntokens, cfg.emsize, cfg.nhead, cfg.nhid,
+                         cfg.nlayers, cfg.dropout).to(device)
 
 criterion = nn.CrossEntropyLoss()
 lr = 5.0  # learning rate
 optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
-
 
 
 def build_writers():
@@ -114,17 +117,12 @@ def build_writers():
     if cfg.extension is None:
         cfg.extension = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
 
-    # self.log_path = cfg.log_dir + cfg.extension
-    # self.writer = tf.summary.create_file_writer(self.log_path)
-    # self.writer.set_as_default()
+    log_path = Path(cfg.log_dir)
+    return SummaryWriter(log_path)
 
-    # #self.saved_models_dir = cfg.saved_models_dir
-    # self.checkpoint_dir = cfg.checkpoint_dir
-    # self.checkpoint_prefix = self.checkpoint_dir + "ckpt_{epoch}"
 
-# def log_scalar(name, scalar):
-#     if (self.global_step % cfg.log_freq) == 0:
-#         tf.summary.scalar(name, scalar, step=self.global_step)
+def log_scalar(name, scalar, n_iter):
+    writer.add_scalar(name, scalar, n_iter)
 
 
 def train():
@@ -132,6 +130,7 @@ def train():
     total_loss = 0.
     start_time = time.time()
     ntokens = len(TEXT.vocab.stoi)
+    logger.info('Training')
     for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
         data, targets = get_batch(train_data, i)
         optimizer.zero_grad()
@@ -146,14 +145,17 @@ def train():
         if batch % log_interval == 0 and batch > 0:
             cur_loss = total_loss / log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'lr {:02.2f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
-                      epoch, batch, len(
-                          train_data) // bptt, scheduler.get_lr()[0],
-                      elapsed * 1000 / log_interval,
-                      cur_loss, math.exp(cur_loss)))
+
+            logger.info('| epoch {:3d} | {:5d}/{:5d} batches | '
+                        'lr {:02.2f} | ms/batch {:5.2f} | '
+                        'loss {:5.2f} | ppl {:8.2f}'.format(
+                            epoch, batch, len(
+                                train_data) // bptt, scheduler.get_lr()[0],
+                            elapsed * 1000 / log_interval,
+                            cur_loss, math.exp(cur_loss)))
+
             total_loss = 0
+
             start_time = time.time()
 
 
@@ -171,12 +173,11 @@ def evaluate(eval_model, data_source):
 
 
 best_val_loss = float("inf")
-epochs = 1  # The number of epochs
 best_model = None
 
-build_writers()
+writer = build_writers()
 
-for epoch in range(1, epochs + 1):
+for epoch in range(1, cfg.epochs + 1):
     epoch_start_time = time.time()
     train()
     val_loss = evaluate(model, val_data)
@@ -186,10 +187,11 @@ for epoch in range(1, epochs + 1):
                                      val_loss, math.exp(val_loss)))
     print('-' * 89)
 
+    log_scalar('loss', val_loss, epoch)
+
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_model = model
-
     scheduler.step()
 
 test_loss = evaluate(best_model, test_data)
@@ -199,4 +201,4 @@ print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
 
-torch.save(best_model, (cfg.checkpoint_dir + cfg.extension + '.pt'))
+#torch.save(best_model, (cfg.checkpoint_dir + cfg.extension + '.pt'))

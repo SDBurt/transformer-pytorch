@@ -15,7 +15,7 @@ import time
 import argparse
 import logging
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from tqdm import trange
 import os
 
@@ -28,28 +28,44 @@ logger.info('Reading Arguments')
 parser = argparse.ArgumentParser()
 
 # Preprocessing ---------------------------------------------------------------
-parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--train_batch_size', type=int, default=20)
+parser.add_argument('--eval_batch_size', type=int, default=10)
 parser.add_argument('--max_length', type=int, default=20)
 parser.add_argument('--buffer_size', type=int, default=2000)
 
 # Model -----------------------------------------------------------------------
+
+# --- embedding dimension
 parser.add_argument('--emsize', type=int, default=200)
+
+# --- the dimension of the feedforward network model in nn.TransformerEncoder
 parser.add_argument('--nhid', type=int, default=200)
+
+# --- the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 parser.add_argument('--nlayers', type=int, default=2)
+
+# --- the number of heads in the multiheadattention models
 parser.add_argument('--nhead', type=int, default=2)
+
+# --- the dropout value
 parser.add_argument('--dropout', type=float, default=0.2)
 
 # Training --------------------------------------------------------------------
-parser.add_argument('--epochs', type=int, default=3)
+parser.add_argument('--epochs', type=int, default=1)
 
 # Saving / Logging ------------------------------------------------------------
-parser.add_argument('--log_dir', type=str, default='./logs/')
+parser.add_argument('--log_dir', type=str, default='./logs')
 parser.add_argument("--log_freq", type=int, default=2)
-parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/')
+parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
 parser.add_argument('--checkpoint_freq', type=int, default=2)
 parser.add_argument('--extension', type=str, default=None)
 
 cfg = parser.parse_args()
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info('Using device: ' + str(device))
+
 
 TEXT = torchtext.data.Field(tokenize=get_tokenizer("basic_english"),
                             init_token='<sos>',
@@ -57,7 +73,6 @@ TEXT = torchtext.data.Field(tokenize=get_tokenizer("basic_english"),
                             lower=True)
 train_txt, val_txt, test_txt = torchtext.datasets.WikiText2.splits(TEXT)
 TEXT.build_vocab(train_txt)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def batchify(data, bsz):
@@ -71,11 +86,9 @@ def batchify(data, bsz):
     return data.to(device)
 
 
-batch_size = 20
-eval_batch_size = 10
-train_data = batchify(train_txt, batch_size)
-val_data = batchify(val_txt, eval_batch_size)
-test_data = batchify(test_txt, eval_batch_size)
+train_data = batchify(train_txt, cfg.train_batch_size)
+val_data = batchify(val_txt, cfg.eval_batch_size)
+test_data = batchify(test_txt, cfg.eval_batch_size)
 
 bptt = 35
 
@@ -87,21 +100,9 @@ def get_batch(source, i):
     return data, target
 
 
-ntokens = len(TEXT.vocab.stoi)  # the size of vocabulary
-emsize = 200  # embedding dimension
-nhid = 200  # the dimension of the feedforward network model in nn.TransformerEncoder
-nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
-nhead = 2  # the number of heads in the multiheadattention models
-dropout = 0.2  # the dropout value
-
-
-model = TransformerModel(ntokens, cfg.emsize, cfg.nhead, cfg.nhid,
-                         cfg.nlayers, cfg.dropout).to(device)
-
-criterion = nn.CrossEntropyLoss()
-lr = 5.0  # learning rate
-optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+def touch(path):
+    with open(path, 'a'):
+        os.utime(path, None)
 
 
 def build_writers():
@@ -115,10 +116,35 @@ def build_writers():
         os.mkdir(cfg.log_dir)
 
     if cfg.extension is None:
-        cfg.extension = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+        cfg.extension = datetime.now().strftime('%Y-%m-%d')
+
+    checkpoint_path = Path(
+        cfg.checkpoint_dir, cfg.extension + '.pt')
+
+    if not checkpoint_path.is_file():
+        touch(checkpoint_path)
 
     log_path = Path(cfg.log_dir)
-    return SummaryWriter(log_path)
+    return SummaryWriter()
+
+
+writer = build_writers()
+
+checkpoint_path = Path(
+    cfg.checkpoint_dir, cfg.extension + '.pt')
+
+ntokens = len(TEXT.vocab.stoi)  # the size of vocabulary
+model = TransformerModel(ntokens, cfg.emsize, cfg.nhead, cfg.nhid,
+                         cfg.nlayers, cfg.dropout).to(device)
+
+if (checkpoint_path).is_file:
+    logger.info('Previous checkpoint found. Loading model.')
+    model = torch.load(checkpoint_path).to(device)
+
+criterion = nn.CrossEntropyLoss()
+lr = 5.0  # learning rate
+optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 
 
 def log_scalar(name, scalar, n_iter):
@@ -175,8 +201,6 @@ def evaluate(eval_model, data_source):
 best_val_loss = float("inf")
 best_model = None
 
-writer = build_writers()
-
 for epoch in range(1, cfg.epochs + 1):
     epoch_start_time = time.time()
     train()
@@ -201,4 +225,5 @@ print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
 print('=' * 89)
 
-#torch.save(best_model, (cfg.checkpoint_dir + cfg.extension + '.pt'))
+logger.info('Saving checkpoint.')
+torch.save(best_model, checkpoint_path)
